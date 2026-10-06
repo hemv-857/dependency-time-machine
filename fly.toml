@@ -1,0 +1,43 @@
+# Dependency Time Machine — Fly.io deployment
+# web:      fly deploy (this file)
+# worker:   fly deploy --image <same image> -c fly.worker.toml (or scale a second process on K8s)
+app = "timemachine"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  # docker = builds run in a throwaway container (no host access, capped, non-root).
+  # The web machine ships no docker daemon, so run builds on a docker-capable
+  # builder machine (see Dockerfile `worker` stage) and keep this one read-only.
+  # `local` is refused outright in production — it would execute third-party
+  # npm lifecycle/build scripts as this user. See src/server/builder/local.ts.
+  TM_RUNNER = "docker"
+  # The web machine ships no daemon and no docker CLI — builds go over the
+  # Engine API to a separate builder host. Set the host as a fly secret:
+  #   fly secrets set TM_DOCKER_HOST=tcp://builder.internal:2375 TM_DOCKER_TOKEN=...
+  TM_DATA_DIR = "/data"
+  # REDIS_URL / DATABASE_URL / GITHUB_TOKEN → fly secrets set ...
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 60
+
+[[http_service.checks]]
+  path = "/api/readyz"
+  interval = "30s"
+  timeout = "5s"
+
+[mounts]
+  source = "tm_data"
+  destination = "/data"

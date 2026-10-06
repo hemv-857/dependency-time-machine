@@ -1,0 +1,10 @@
+node_modules
+.next
+.data
+e2e/.data
+.tmp-test-data
+test-results
+playwright-report
+.git
+.env
+*.md

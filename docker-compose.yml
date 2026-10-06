@@ -1,0 +1,64 @@
+services:
+  web:
+    build:
+      context: .
+      target: runner
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgres://tm:tm@db:5432/timemachine
+      REDIS_URL: redis://cache:6379
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      TM_RUNNER: local
+      TM_DATA_DIR: /app/.data
+      LOG_LEVEL: info
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    volumes:
+      - tmdata:/app/.data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker
+    command: ['npx', 'tsx', 'worker/index.ts']
+    environment:
+      DATABASE_URL: postgres://tm:tm@db:5432/timemachine
+      REDIS_URL: redis://cache:6379
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      TM_RUNNER: local
+      TM_DATA_DIR: /app/.data
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    volumes:
+      - tmdata:/app/.data
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tm
+      POSTGRES_PASSWORD: tm
+      POSTGRES_DB: timemachine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tm']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  tmdata:

@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.data/
+.tmp-test-data/
+e2e/.data/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.env
+.DS_Store
