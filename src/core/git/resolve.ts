@@ -52,7 +52,10 @@ export async function resolveCommit(
   opts: { dateIso?: string; ref?: string }
 ): Promise<{ sha: string; committedDate: string; refUsed: string | null; repo: GhRepo }> {
   const repo = await gh.repo(fullName);
-  if (repo.private) throw new Error('This repo is private — only public repos are supported in v1.');
+  // No explicit private-repo rejection here: reaching this line means
+  // `/repos/{owner}/{repo}` already succeeded, so the credentials in use can read
+  // it — a GitHub App installation token when one is configured. Repos we cannot
+  // read 404 before this point, which is the real access check.
   if (opts.ref) {
     const c = await gh.commit(fullName, opts.ref);
     return { sha: c.sha, committedDate: c.committedDate, refUsed: opts.ref, repo };

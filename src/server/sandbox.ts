@@ -13,7 +13,10 @@ export interface Sandbox {
   id: string;
   snapshotId: string;
   port: number;
+  /** Address the app dials to reach this sandbox. Derived from config, never user input. */
+  host: string;
   kind: 'static' | 'server';
+  runner: 'local' | 'docker';
   child?: ChildProcess;
   containerId?: string;
   startedAt: number;
@@ -87,19 +90,165 @@ export async function start(opts: {
   }
   child.unref();
 
-  const sb: Sandbox = { id, snapshotId: opts.snapshotId, port, kind, child, startedAt: Date.now(), expiresAt: Date.now() + TTL_MS };
+  const sb: Sandbox = {
+    id,
+    snapshotId: opts.snapshotId,
+    port,
+    host: '127.0.0.1',
+    kind,
+    runner: 'local',
+    child,
+    startedAt: Date.now(),
+    expiresAt: Date.now() + TTL_MS,
+  };
   reg().sandboxes.set(id, sb);
-  await waitForPort(port, kind === 'static' ? 10_000 : 30_000);
+  await waitForPort('127.0.0.1', port, kind === 'static' ? 10_000 : 30_000);
   log.info({ sandboxId: id, snapshotId: opts.snapshotId, port, kind }, 'sandbox started');
   ensureSweeper();
   return sb;
 }
 
-async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
+/**
+ * Address the container's port is published on, on the daemon host.
+ *
+ * Loopback by default, which means the untrusted preview is reachable only from
+ * the machine running the daemon — anyone else (including this app on another
+ * host) cannot dial it directly, so they cannot bypass the preview route's
+ * liveness checks. Widening it publishes a stranger's `npm start` to the network.
+ */
+export function previewBindIp(): string {
+  const raw = (process.env.TM_DOCKER_PREVIEW_BIND || '127.0.0.1').trim();
+  return raw === 'localhost' ? '127.0.0.1' : raw;
+}
+
+/** Where this app should dial to reach a published container port. */
+export function previewDialHost(): string {
+  const bind = previewBindIp();
+  if (bind && bind !== '0.0.0.0' && bind !== '::') return bind;
+  // wildcard publish: reach the daemon over whatever address it lives on
+  const h = (process.env.TM_DOCKER_HOST || '').trim();
+  if (h.startsWith('tcp://') || h.startsWith('http://') || h.startsWith('https://')) {
+    try {
+      return new URL(h.includes('://') ? h : `tcp://${h}`).hostname;
+    } catch {
+      /* fall through */
+    }
+  }
+  return '127.0.0.1';
+}
+
+export function previewBindIsPublic(): boolean {
+  const b = previewBindIp();
+  return b === '0.0.0.0' || b === '::';
+}
+
+/**
+ * Start a repo's server inside a container so server-mode previews work with a
+ * remote daemon, instead of requiring the (production-refused) local runner.
+ *
+ * The container gets the same treatment as a build: no bind mounts, caps dropped,
+ * resource caps, and a loopback-only published port. There is no separate signed
+ * token — the unguessable sandbox id plus the TTL plus the loopback bind are the
+ * access control, and a URL token would add a secret without adding a boundary
+ * (anyone who can reach the port directly ignores the URL anyway).
+ */
+export async function startContainer(opts: {
+  snapshotId: string;
+  projDir: string;
+  startCmd: string;
+  installCmd?: string;
+  containerPort?: number;
+  image?: string;
+}): Promise<Sandbox> {
+  const api = await import('./builder/docker-api');
+  if (!(await api.ping())) {
+    throw new Error(`docker unreachable — set TM_DOCKER_HOST to a reachable daemon to start a server preview`);
+  }
+  if (previewBindIsPublic()) {
+    log.warn(
+      { bind: previewBindIp() },
+      'TM_DOCKER_PREVIEW_BIND publishes untrusted preview containers beyond loopback'
+    );
+  }
+
+  const cport = opts.containerPort || Number(process.env.TM_DOCKER_PREVIEW_PORT || 3000);
+  const image = opts.image || process.env.TM_NODE_IMAGE || 'node:20-bookworm-slim';
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+  const containerId = await api.createContainer({
+    image,
+    // no bind mounts: the tree is uploaded below
+    cmd: ['bash', '-lc', `set -e\ncd /work\n${opts.installCmd ? `${opts.installCmd}\n` : ''}exec ${opts.startCmd}`],
+    workdir: '/work',
+    env: [
+      'HOME=/tmp/home',
+      'PORT=' + String(cport),
+      'HOST=0.0.0.0',
+      'NODE_ENV=production',
+      'CI=1',
+      'NO_COLOR=1',
+      'npm_config_update_notifier=false',
+      'npm_config_fund=false',
+      'npm_config_audit=false',
+    ],
+    network: process.env.TM_DOCKER_NETWORK || 'bridge',
+    memoryBytes: 1024 * 1024 * 1024,
+    nanoCpus: 1_500_000_000,
+    pidsLimit: 512,
+    capDrop: ['ALL'],
+    securityOpt: ['no-new-privileges'],
+    tmpfs: { '/tmp': 'rw,noexec,nosuid,size=256m', '/tmp/home': 'rw,nosuid,size=16m' },
+    exposedPorts: [`${cport}/tcp`],
+    // HostPort 0 lets the daemon pick a free port, so concurrent previews
+    // cannot collide on a fixed number.
+    portBindings: { [`${cport}/tcp`]: { hostIp: previewBindIp(), hostPort: '0' } },
+  });
+
+  try {
+    await api.putArchive(containerId, '/work', tarStream(opts.projDir));
+    await api.startContainer(containerId);
+
+    const info = await api.inspectContainer(containerId);
+    const mapped = info.NetworkSettings?.Ports?.[`${cport}/tcp`]?.[0];
+    const hostPort = Number(mapped?.HostPort);
+    if (!Number.isFinite(hostPort) || hostPort <= 0) {
+      throw new Error(`docker did not publish a host port for ${cport}/tcp`);
+    }
+
+    const sb: Sandbox = {
+      id,
+      snapshotId: opts.snapshotId,
+      port: hostPort,
+      host: previewDialHost(),
+      kind: 'server',
+      runner: 'docker',
+      containerId,
+      startedAt: Date.now(),
+      expiresAt: Date.now() + TTL_MS,
+    };
+    reg().sandboxes.set(id, sb);
+    // installing deps inside a fresh container is the slow part
+    await waitForPort(sb.host, hostPort, Number(process.env.TM_PREVIEW_READY_TIMEOUT_MS || 120_000));
+    log.info({ sandboxId: id, snapshotId: opts.snapshotId, host: sb.host, port: hostPort, kind: 'server', runner: 'docker' }, 'container sandbox started');
+    ensureSweeper();
+    return sb;
+  } catch (e) {
+    await api.removeContainer(containerId);
+    throw e;
+  }
+}
+
+function tarStream(dir: string): NodeJS.ReadableStream {
+  const t = spawn('tar', ['-cf', '-', '-C', dir, '.'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.stderr.resume();
+  return t.stdout;
+}
+
+async function waitForPort(host: string, port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const up = await new Promise<boolean>((resolve) => {
-      const socket = net.connect({ port, host: '127.0.0.1' });
+      const socket = net.connect({ port, host });
       socket.once('connect', () => {
         socket.destroy();
         resolve(true);
@@ -138,6 +287,13 @@ export function stop(id: string): void {
   const sb = reg().sandboxes.get(id);
   if (!sb) return;
   if (sb.child?.pid) killTree(sb.child.pid);
+  if (sb.containerId) {
+    // fire-and-forget: a preview container must not outlive its sandbox, and a
+    // dead daemon must not block the registry from being cleaned up
+    void import('./builder/docker-api')
+      .then((api) => api.removeContainer(sb.containerId!))
+      .catch(() => {});
+  }
   reg().sandboxes.delete(id);
   log.info({ sandboxId: id, snapshotId: sb.snapshotId }, 'sandbox stopped');
 }

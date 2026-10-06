@@ -1,8 +1,11 @@
 import { Advisory, Ecosystem, Lockfile, OsvVuln, SecurityLens } from '../types';
+import { withRetry } from '@/server/retry';
 
 const OSV_ECOSYSTEM: Partial<Record<Ecosystem, string>> = {
   npm: 'npm',
   pypi: 'PyPI',
+  go: 'Go',
+  cargo: 'crates.io',
 };
 
 export interface OsvQueryItem {
@@ -51,15 +54,25 @@ export async function queryOsvBatch(
   try {
     for (let i = 0; i < items.length; i += CHUNK) {
       const chunk = items.slice(i, i + CHUNK);
-      const res = await fetchImpl(`${base()}/v1/querybatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          queries: chunk.map((it) => ({ package: { name: it.name, ecosystem: eco }, version: it.version })),
-        }),
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!res.ok) throw new Error(`OSV ${res.status}`);
+      const res = await withRetry(
+        () =>
+          fetchImpl(`${base()}/v1/querybatch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              queries: chunk.map((it) => ({ package: { name: it.name, ecosystem: eco }, version: it.version })),
+            }),
+            signal: AbortSignal.timeout(12_000),
+          }),
+        // only two attempts: this is one call for up to 100 packages, and the
+        // whole lens degrades to "unavailable" if it ultimately fails
+        { attempts: 2 }
+      );
+      if (!res.ok) {
+        const err = new Error(`OSV ${res.status}`) as Error & { status?: number };
+        err.status = res.status;
+        throw err;
+      }
       const j = (await res.json()) as { results?: ({ vulns?: RawVuln[] } | null)[] };
       const rs = j.results || [];
       for (const r of rs) results.push((r?.vulns || []).map(toVuln));

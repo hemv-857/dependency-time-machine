@@ -12,6 +12,7 @@ import { npmDoc } from './npm-registry';
 import { planBuild, BuildPlan } from './builder/plan';
 import { runLocal, toolchainVersions } from './builder/local';
 import { runDocker, dockerAvailable } from './builder/docker';
+import { untrustedExecAllowed } from './builder/local';
 import { findOutDir } from './builder/local';
 import { stopForSnapshot } from './sandbox';
 import { newId, nowIso, Store, SnapshotRow } from './store/index';
@@ -370,6 +371,14 @@ async function finish(store: Store, row: SnapshotRow, stages: Stage[]): Promise<
 
 function installSnippetFor(analysis: Analysis): string | null {
   if (analysis.manifest?.ownName) {
+    if (analysis.ecosystem === 'go') {
+      return `go get ${analysis.manifest.ownName}@${analysis.manifest.ownVersion || 'latest'}`;
+    }
+    if (analysis.ecosystem === 'cargo') {
+      return `cargo add ${analysis.manifest.ownName}${
+        analysis.manifest.ownVersion ? `@${analysis.manifest.ownVersion}` : ''
+      }`;
+    }
     return `npm i ${analysis.manifest.ownName}@${analysis.manifest.ownVersion || 'latest'}`;
   }
   if (analysis.ecosystem === 'pypi') return 'pip install -r requirements.txt';
@@ -479,20 +488,65 @@ export async function ensurePreview(id: string): Promise<{ sandboxId: string; ur
   } catch {
     result = null;
   }
+  let analysis: Analysis | null = null;
+  let plan: BuildPlan | null = null;
   if (!result || !result.ok) {
     // cache miss → run the build now
-    const analysis = await analyzeCommit((await import('./github')).ghClient(), row.repo, row.commitSha);
-    const plan = planBuild({ type: analysis.projectType, manifest: analysis.manifest, hasLockfile: analysis.hasLockfile });
+    analysis = await analyzeCommit((await import('./github')).ghClient(), row.repo, row.commitSha);
+    plan = planBuild({ type: analysis.projectType, manifest: analysis.manifest, hasLockfile: analysis.hasLockfile });
     if (!plan) throw new Error('not runnable');
     result = await executeBuild(row, analysis, plan);
     if (!result.ok) throw new Error('build failed — no preview available');
   }
+  // a cached result.json still needs the plan to know how to install+start
+  if (!analysis) analysis = await analyzeCommit((await import('./github')).ghClient(), row.repo, row.commitSha);
+  if (!plan) {
+    plan = planBuild({ type: analysis.projectType, manifest: analysis.manifest, hasLockfile: analysis.hasLockfile });
+  }
+  if (!plan) throw new Error('not runnable');
 
-  const sb = result.mode === 'static' && result.outDir
-    ? await start({ snapshotId: id, staticDir: `${projDir}/${result.outDir}` })
-    : await start({ snapshotId: id, startCmd: 'npm start', projDir });
+  const sb =
+    result.mode === 'static' && result.outDir
+      ? await start({ snapshotId: id, staticDir: `${projDir}/${result.outDir}` })
+      : await startServerPreview({ snapshotId: id, projDir, analysis, plan });
 
   return { sandboxId: sb.id, url: `/api/preview/${sb.id}`, expiresAt: sb.expiresAt };
+}
+
+/**
+ * Start a repo's own server for the preview.
+ *
+ * Preferred path is a container, so this works with a remote daemon: the tree is
+ * uploaded and `npm start` runs inside an ephemeral container with the same
+ * hardening as a build. The local runner stays as the dev fallback, and is still
+ * refused in production unless explicitly allowed — which it now does *after*
+ * Docker has been ruled out, rather than before it is even considered.
+ */
+async function startServerPreview(args: {
+  snapshotId: string;
+  projDir: string;
+  analysis: Analysis;
+  plan: BuildPlan;
+}): Promise<{ id: string; expiresAt: number }> {
+  const { startContainer, start } = await import('./sandbox');
+  const install = args.plan.steps.find((s) => s.name === 'install')?.cmd;
+  try {
+    return await startContainer({
+      snapshotId: args.snapshotId,
+      projDir: args.projDir,
+      startCmd: 'npm start',
+      installCmd: install,
+      image: args.plan.toolchain === 'python' ? process.env.TM_PYTHON_IMAGE : process.env.TM_NODE_IMAGE,
+    });
+  } catch (e) {
+    if (!untrustedExecAllowed()) throw e;
+    log.warn({ err: (e as Error).message }, 'container preview unavailable — falling back to the local runner');
+    return start({
+      snapshotId: args.snapshotId,
+      startCmd: 'npm start',
+      projDir: args.projDir,
+    });
+  }
 }
 
 export type { SnapshotRow, Store };

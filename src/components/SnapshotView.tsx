@@ -142,6 +142,14 @@ export default function SnapshotView({ owner, name, when, sharePath }: { owner: 
           >
             {copied ? '✓ copied' : '🔗 share'}
           </button>
+          <a
+            className="btn-ghost text-xs"
+            href={`/api/snapshot/${snap.id}/markdown`}
+            download
+            title="Download this snapshot as a Markdown report"
+          >
+            ↓ markdown
+          </a>
         </div>
       </div>
 

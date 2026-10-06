@@ -133,6 +133,71 @@ export function parseRequirementsTxt(text: string): Lockfile {
   return { ecosystem: 'pypi', path: 'requirements.txt', packages };
 }
 
+/**
+ * go.sum — one `<module> <version> <hash>` line per module, plus a duplicate
+ * line per module ending in `/go.mod`. Only the plain entry is a real pin.
+ */
+export function parseGoSum(text: string): Lockfile {
+  const packages: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('//')) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length < 3) continue;
+    const module = parts[0];
+    const rawVersion = parts[1];
+    if (!module || !rawVersion.startsWith('v')) continue;
+    if (rawVersion.endsWith('/go.mod')) continue;
+    // normalize to the bare semver so diffs and OSV lookups match the other
+    // ecosystems (OSV accepts both forms)
+    const version = rawVersion.replace(/^v/, '');
+    if (packages[module]) continue;
+    packages[module] = version;
+  }
+  return { ecosystem: 'go', path: 'go.sum', packages };
+}
+
+/**
+ * Cargo.lock — TOML with repeated `[[package]]` blocks. Hand-parsed rather than
+ * pulling in a TOML dependency: the shape is fixed and tiny.
+ */
+export function parseCargoLock(text: string): Lockfile {
+  const packages: Record<string, string> = {};
+  let name: string | undefined;
+  let version: string | undefined;
+  // Cargo.lock also contains [[patch.*]] and other tables; only [[package]]
+  // entries are real pins.
+  let inPackage = false;
+
+  const flush = () => {
+    if (inPackage && name && version && !packages[name]) packages[name] = version;
+    name = undefined;
+    version = undefined;
+    inPackage = false;
+  };
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === '[[package]]') {
+      flush();
+      inPackage = true;
+      continue;
+    }
+    if (line.startsWith('[')) {
+      // any other table (e.g. [[patch.unused]]) is not a dependency
+      flush();
+      continue;
+    }
+    if (!inPackage) continue;
+    const n = /^name\s*=\s*"([^"]+)"/.exec(line);
+    if (n) name = n[1];
+    const v = /^version\s*=\s*"([^"]+)"/.exec(line);
+    if (v) version = v[1];
+  }
+  flush();
+  return { ecosystem: 'cargo', path: 'Cargo.lock', packages };
+}
+
 export function parsePackageJson(text: string): Manifest {
   const j = JSON.parse(text);
   return {
@@ -172,7 +237,48 @@ export function parseLockfileFrom(files: string[], read: (relPath: string) => st
     const t = read('requirements.txt');
     if (t) return parseRequirementsTxt(t);
   }
+  if (has('go.sum')) {
+    const t = read('go.sum');
+    if (t) return parseGoSum(t);
+  }
+  if (has('Cargo.lock')) {
+    const t = read('Cargo.lock');
+    if (t) return parseCargoLock(t);
+  }
   return null;
+}
+
+/**
+ * go.mod — we only need the main module path, for an install snippet.
+ */
+export function parseGoMod(text: string): Manifest {
+  const m = /^module\s+(\S+)/m.exec(text);
+  return {
+    ecosystem: 'go',
+    path: 'go.mod',
+    dependencies: {},
+    ownName: m ? m[1] : undefined,
+    ownVersion: undefined,
+    scripts: {},
+    files: [],
+  };
+}
+
+/** Cargo.toml — name/version from the [package] table. */
+export function parseCargoToml(text: string): Manifest {
+  const pkgSection = /^\s*\[package\]([\s\S]*?)(?=^\s*\[|\Z)/m.exec(text);
+  const body = pkgSection ? pkgSection[1] : text;
+  const n = /^\s*name\s*=\s*"([^"]+)"/m.exec(body);
+  const v = /^\s*version\s*=\s*"([^"]+)"/m.exec(body);
+  return {
+    ecosystem: 'cargo',
+    path: 'Cargo.toml',
+    dependencies: {},
+    ownName: n ? n[1] : undefined,
+    ownVersion: v ? v[1] : undefined,
+    scripts: {},
+    files: [],
+  };
 }
 
 export function parseManifestFrom(files: string[], read: (relPath: string) => string | null): Manifest | null {
@@ -180,6 +286,22 @@ export function parseManifestFrom(files: string[], read: (relPath: string) => st
     const t = read('package.json');
     if (t) {
       const m = parsePackageJson(t);
+      m.files = files;
+      return m;
+    }
+  }
+  if (files.includes('go.mod')) {
+    const t = read('go.mod');
+    if (t) {
+      const m = parseGoMod(t);
+      m.files = files;
+      return m;
+    }
+  }
+  if (files.includes('Cargo.toml')) {
+    const t = read('Cargo.toml');
+    if (t) {
+      const m = parseCargoToml(t);
       m.files = files;
       return m;
     }

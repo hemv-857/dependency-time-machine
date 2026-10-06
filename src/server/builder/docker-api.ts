@@ -189,6 +189,9 @@ export interface CreateSpec {
   capDrop?: string[];
   securityOpt?: string[];
   tmpfs?: Record<string, string>;
+  /** publish containerPort -> host, e.g. { "3000/tcp": { hostIp, hostPort } } */
+  portBindings?: Record<string, { hostIp: string; hostPort: string }>;
+  exposedPorts?: string[];
 }
 
 export async function createContainer(spec: CreateSpec): Promise<string> {
@@ -202,6 +205,11 @@ export async function createContainer(spec: CreateSpec): Promise<string> {
   if (spec.capDrop) hostConfig.CapDrop = spec.capDrop;
   if (spec.securityOpt) hostConfig.SecurityOpt = spec.securityOpt;
   if (spec.tmpfs) hostConfig.Tmpfs = spec.tmpfs;
+  if (spec.portBindings) {
+    const bindings: Record<string, { HostIp: string; HostPort: string }[]> = {};
+    for (const [c, h] of Object.entries(spec.portBindings)) bindings[c] = [{ HostIp: h.hostIp, HostPort: h.hostPort }];
+    hostConfig.PortBindings = bindings;
+  }
 
   const body = Buffer.from(
     JSON.stringify({
@@ -215,6 +223,7 @@ export async function createContainer(spec: CreateSpec): Promise<string> {
       WorkingDir: spec.workdir,
       Env: spec.env,
       User: spec.user || '',
+      ExposedPorts: spec.exposedPorts,
       Labels: { 'tm.role': 'build' },
       HostConfig: hostConfig,
     })
@@ -238,6 +247,17 @@ export async function putArchive(id: string, path: string, tar: NodeJS.ReadableS
 
 export async function startContainer(id: string): Promise<void> {
   await dockerOk(await dockerRequest('POST', `/containers/${id}/start`, { timeoutMs: 60_000 }));
+}
+
+/** Inspect a container, e.g. to read back which host port a mapping landed on. */
+export async function inspectContainer(id: string): Promise<{
+  State?: { Running?: boolean; ExitCode?: number; Status?: string };
+  NetworkSettings?: { Ports?: Record<string, { HostIp: string; HostPort: string }[] | null> };
+}> {
+  const res = await dockerOk(await dockerRequest('GET', `/containers/${id}/json`, { timeoutMs: 15_000 }));
+  const chunks: Buffer[] = [];
+  for await (const c of res) chunks.push(c as Buffer);
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
 export async function containerLogs(

@@ -6,6 +6,8 @@ import { Transform } from 'node:stream';
 import { GhCommit, GhRepo, NotFoundError, RateLimitError } from '@/core/git/resolve';
 import { ReleaseInfo } from '@/core/types';
 import { TtlCache } from './ttl-cache';
+import { withRetry } from './retry';
+import { appConfigured, clearTokenCache, tokenForRepo } from './github-app';
 
 function base(): string {
   return (process.env.TM_GITHUB_API_BASE || 'https://api.github.com').replace(/\/$/, '');
@@ -21,14 +23,36 @@ export class GhClient {
   private cache = new TtlCache<unknown>(JSON_TTL_MS, 2000);
   remaining: number | null = null;
   resetAt: string | null = null;
+  /** last repo the App is not installed on, so 404s can say why */
+  appNotInstalled: string | null = null;
+
+  /**
+   * Authorization for a request.
+   *
+   * Every data endpoint in this client is `/repos/{owner}/{repo}/...`, so the repo
+   * is derived from the path rather than threaded through every call site. If a
+   * GitHub App is configured, an installation token scoped to that repo wins —
+   * which is both the only way to read private repos and the narrower trust
+   * boundary, since it cannot read anything the App is not installed on.
+   */
+  private async authHeader(path: string): Promise<Record<string, string>> {
+    const m = /^\/repos\/([^/]+)\/([^/?#]+)/.exec(path);
+    if (m) {
+      const out = await tokenForRepo(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+      if (out.kind === 'token') return { Authorization: `Bearer ${out.token}` };
+      if (out.kind === 'not-installed') this.appNotInstalled = `${m[1]}/${m[2]}`;
+    }
+    if (process.env.GITHUB_TOKEN) return { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` };
+    return {};
+  }
 
   private async req(path: string, opts: { raw?: boolean; ttlMs?: number } = {}): Promise<Response> {
     const url = path.startsWith('http') ? path : `${base()}${path}`;
     const headers: Record<string, string> = {
-      Accept: opts.raw ? 'application/vnd.github+json' : 'application/vnd.github+json',
+      Accept: 'application/vnd.github+json',
       'User-Agent': 'dependency-time-machine/0.1',
+      ...(await this.authHeader(path)),
     };
-    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
     const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(30_000) });
     const rem = res.headers.get('x-ratelimit-remaining');
     if (rem !== null) this.remaining = Number(rem);
@@ -43,15 +67,30 @@ export class GhClient {
         );
       }
     }
-    if (res.status === 404) throw new NotFoundError(`GitHub returned 404 for ${path}`);
-    if (!res.ok) throw new Error(`GitHub API ${res.status} for ${path}`);
+    if (res.status === 404) {
+      throw new NotFoundError(
+        appConfigured() && this.appNotInstalled
+          ? `Repository not found, or the GitHub App is not installed on it: ${this.appNotInstalled}`
+          : `GitHub returned 404 for ${path}`
+      );
+    }
+    if (res.status === 401) {
+      // a revoked/expired installation token: drop it and let the next call re-mint
+      clearTokenCache();
+    }
+    if (!res.ok) {
+      // carry the status so the retry policy can tell a blip from a hard failure
+      const err = new Error(`GitHub API ${res.status} for ${path}`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
+    }
     return res;
   }
 
   private async json<T>(path: string, ttlMs = JSON_TTL_MS): Promise<T> {
     const hit = this.cache.get(path);
     if (hit) return hit as T;
-    const res = await this.req(path);
+    const res = await withRetry(() => this.req(path));
     const data = (await res.json()) as T;
     this.cache.set(path, data, ttlMs);
     return data;

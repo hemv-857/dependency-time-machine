@@ -143,6 +143,15 @@ export function postgresStore(): Store {
       vals.push(id);
       await get().query(`UPDATE snapshots SET ${sets.join(', ')} WHERE id = $${i + 1}`, vals);
     },
+    async listStranded(before) {
+      const res = await get().query(
+        `SELECT * FROM snapshots
+         WHERE status NOT IN ('ready','degraded','failed') AND updated_at < $1
+         ORDER BY updated_at ASC LIMIT 200`,
+        [before]
+      );
+      return res.rows.map(rowFrom);
+    },
     async close() {
       await pool().end();
     },

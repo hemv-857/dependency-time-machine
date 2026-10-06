@@ -18,6 +18,7 @@ OSV advisory data.
 | Stage | Behaviour |
 |---|---|
 | **Resolve** | `git rev-list -n 1 --before=DATE` equivalent via the GitHub API, or jump to a tag |
+| **Export** | Download the whole snapshot as a standalone Markdown report |
 | **Analyse** | Fetch the commit tarball, detect ecosystem, parse manifest and lockfile |
 | **Diff** | Lockfile then-vs-now: majors, minors, patches, additions, removals |
 | **Security lens** | OSV batch query — which advisories were open back then, which are fixed now, which are still open |
@@ -25,7 +26,11 @@ OSV advisory data.
 | **Build** | Ephemeral container builds that exact dependency tree, then serves the output |
 
 Repositories with no lockfile (libraries) skip the build and show the README plus
-an install snippet instead. Public GitHub only, in v1.
+an install snippet instead. Lockfile diffing covers npm, pnpm, Yarn,
+`requirements.txt`, `go.sum` and `Cargo.lock`; OSV advisories cover npm, PyPI,
+Go and crates.io.
+
+Private repositories work through a [GitHub App](#private-repositories).
 
 ## Architecture
 
@@ -108,6 +113,11 @@ Everything is optional; defaults run in-process with in-memory state.
 | Variable | Default | Notes |
 |---|---|---|
 | `GITHUB_TOKEN` | — | Anonymous GitHub API is 60 req/hr per IP. Set this. |
+| `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | — | Enables private repos. See below. |
+| `TM_STALE_SNAPSHOT_MS` | `900000` | Fail snapshots stranded by a dead process. |
+| `TM_PUBLIC_URL` | — | Public origin for permalinks in exported Markdown. |
+| `TM_DOCKER_PREVIEW_BIND` | `127.0.0.1` | Address the preview container's port binds to on the daemon host. |
+| `TM_PREVIEW_READY_TIMEOUT_MS` | `120000` | How long to wait for a preview container. |
 | `DATABASE_URL` | — | Postgres. Without it, snapshots are lost on restart. |
 | `REDIS_URL` | — | Redis + BullMQ. Without it, builds run in the web process. |
 | `TM_RUNNER` | `auto` | `docker`, `local`, or `auto`. `auto` fails closed. |
@@ -142,18 +152,45 @@ snapshots degrade rather than break.
 
 ```bash
 npm run typecheck
-npm test              # 39 unit tests
+npm test              # 112 unit tests
 npm run test:e2e      # build + 11 Playwright tests
 ```
 
-Unit tests cover the core logic plus the production hardening paths. The Docker
-runner is tested against a fake Engine API, so the upload/run/download path is
-verified without a daemon installed.
+Unit tests cover the core logic plus the production hardening paths: the stale
+reaper, retry classification, Markdown escaping, the new lockfile parsers, the
+Docker Engine API, and GitHub App token minting (with a generated RSA key, so the
+JWT signature is verified without real credentials). The Docker runner is tested
+against a fake Engine API, so the upload/run/download path is verified without a
+daemon installed.
 
 `e2e/audit.spec.ts` is a sweep over every route that fails on console errors, page
 exceptions, 5xx responses, missing stylesheet regressions, and horizontal
 overflow at mobile, tablet and desktop widths. It also asserts the share button
 does not claim a copy succeeded when the clipboard write was denied.
+
+## Private repositories
+
+A personal `GITHUB_TOKEN` inherits access to every private repo that user can
+read. For a service that builds code that is the wrong trust boundary, so private
+repos go through a [GitHub App](https://docs.github.com/en/apps) instead, which is
+scoped to the repositories it is installed on and enforced by GitHub — access is
+simply "is there an installation for this repo".
+
+1. Create a GitHub App with read-only **Contents** and **Metadata** permission.
+2. Install it on the repositories you want reachable.
+3. Download the private key and set:
+
+```
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=/path/to/app.pem   # or the PEM contents, \n for newlines
+```
+
+Internally: private key → short-lived JWT (9 min) → installation access token
+(1 h, cached in memory for 50 min). Tokens are per-repo scoped and dropped on a
+401. Never commit the key.
+
+Without a key configured everything falls back to `GITHUB_TOKEN`, so public
+snapshots are unaffected.
 
 ## Deployment
 
@@ -164,12 +201,15 @@ does not claim a copy succeeded when the clipboard write was denied.
 
 ## Limitations
 
-- Public GitHub repositories only; private repos are not supported.
-- Server-mode previews (`npm start`) still require a local runner. Publishing a
-  container port to a *remote* daemon would make the preview network-reachable,
-  which is a different security decision from the build path, so it stays gated.
-- The remote-daemon build path is verified against a fake Engine API rather than a
-  live daemon.
+- Private repositories need a GitHub App; there is no per-user OAuth flow.
+- Server-mode previews publish a container port on the daemon host. That is
+  loopback-only by default, so a preview is only reachable when this app can dial
+  the daemon's loopback. Setting `TM_DOCKER_PREVIEW_BIND=0.0.0.0` publishes a
+  stranger's `npm start` to the network — the app logs a warning, but that setting
+  is a real exposure.
+- The remote-daemon build and preview paths are verified against a fake Engine
+  API rather than a live daemon.
+- Advisory coverage follows OSV: npm, PyPI, Go and crates.io.
 - Node's `--permission` model is not used as isolation; it is not a security
   boundary.
 - In-memory state means one process. Scale out with Postgres + Redis.

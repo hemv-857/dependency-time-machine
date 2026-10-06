@@ -68,6 +68,10 @@ export function getQueue(): JobQueue {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { runSnapshotJob } = require('./pipeline') as typeof import('./pipeline');
     q.process((id) => runSnapshotJob(id));
+    // Whoever processes jobs is also whoever notices jobs that died with their
+    // process. Without this a crashed snapshot stays non-terminal forever.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    (require('./reaper') as typeof import('./reaper')).startReaper();
   }
   return q;
 }

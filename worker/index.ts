@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { singletons } from '@/server/singletons';
 import { runSnapshotJob } from '@/server/pipeline';
+import { reapStaleSnapshots, startReaper } from '@/server/reaper';
 import { sweep, activeCount } from '@/server/sandbox';
 import { childLogger } from '@/server/log';
 
@@ -14,6 +15,11 @@ const log = childLogger({ mod: 'worker' });
 async function main() {
   const s = singletons();
   log.info({ queueMode: s.queue.mode, redis: !!process.env.REDIS_URL }, 'worker starting');
+
+  startReaper();
+  // Recover anything a previous process left mid-flight before accepting new work.
+  const recovered = await reapStaleSnapshots();
+  if (recovered.swept) log.warn({ swept: recovered.swept }, 'recovered stranded snapshots at boot');
 
   if (s.queue.mode === 'redis') {
     s.queue.process((id) => runSnapshotJob(id));

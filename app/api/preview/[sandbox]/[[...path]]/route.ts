@@ -19,7 +19,10 @@ async function proxy(req: Request, sandboxId: string, path: string[] | undefined
     );
   }
   const url = new URL(req.url);
-  const target = `http://127.0.0.1:${sb.port}/${(path || []).join('/')}${url.search}`;
+  // sb.host is derived from config (loopback, or the daemon address for a remote
+  // builder) — never from the request — so this proxy cannot be steered into
+  // an internal address by a caller.
+  const target = `http://${sb.host}:${sb.port}/${(path || []).join('/')}${url.search}`;
   const headers = new Headers();
   req.headers.forEach((v, k) => {
     if (!HOP_BY_HOP.has(k.toLowerCase())) headers.set(k, v);

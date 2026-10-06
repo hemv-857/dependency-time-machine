@@ -37,8 +37,15 @@ export interface Store {
   getSnapshot(id: string): Promise<SnapshotRow | null>;
   findSnapshot(repo: string, commitSha: string): Promise<SnapshotRow | null>;
   updateSnapshot(id: string, patch: Partial<SnapshotRow>): Promise<void>;
+  /** Non-terminal snapshots last touched before `before` (ISO). Used by the stale reaper. */
+  listStranded(before: string): Promise<SnapshotRow[]>;
   close(): Promise<void>;
 }
+
+/** Statuses from which a snapshot never moves again without external help. */
+export const TERMINAL_STATUSES = ['ready', 'degraded', 'failed'] as const;
+export const isTerminal = (s: SnapshotStatus): boolean =>
+  (TERMINAL_STATUSES as readonly string[]).includes(s);
 
 export function newId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
@@ -72,6 +79,11 @@ export function memoryStore(): Store {
       const r = rows.get(id);
       if (!r) return;
       Object.assign(r, patch, { updatedAt: nowIso() });
+    },
+    async listStranded(before: string) {
+      return [...rows.values()]
+        .filter((r) => !isTerminal(r.status) && r.updatedAt < before)
+        .map((r) => ({ ...r }));
     },
     async close() {
       rows.clear();

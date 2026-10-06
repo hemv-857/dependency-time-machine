@@ -32,9 +32,10 @@ function fakeTar(dir: string): Promise<Buffer> {
   });
 }
 
-async function startFakeDaemon(o: FakeOpts) {
+async function startFakeDaemon(o: FakeOpts & { mappedPort?: number }) {
   const http = await import('node:http');
   const calls: string[] = [];
+  const createdBodies: any[] = [];
   let uploadedBytes = 0;
 
   const server: Server = http.createServer((req: IncomingMessage, res) => {
@@ -56,13 +57,31 @@ async function startFakeDaemon(o: FakeOpts) {
     if (req.method === 'POST' && url.includes('/containers/create')) {
       let body = '';
       req.on('data', (c) => (body += c));
-      return req.on('end', () => send(201, JSON.stringify({ Id: 'deadbeefcafe' })));
+      return req.on('end', () => {
+        try {
+          createdBodies.push(JSON.parse(body));
+        } catch {
+          /* ignore */
+        }
+        send(201, JSON.stringify({ Id: 'deadbeefcafe' }));
+      });
     }
     if (req.method === 'PUT' && url.includes('/archive')) {
       req.on('data', (c) => (uploadedBytes += c.length));
       return req.on('end', () => send(200, '{}'));
     }
     if (req.method === 'POST' && url.includes('/start')) return send(204);
+    if (req.method === 'GET' && /\/containers\/[^/]+\/json/.test(url)) {
+      // report the host port the daemon "chose" for the published mapping
+      const port = o.mappedPort || 40001;
+      return send(
+        200,
+        JSON.stringify({
+          State: { Running: true, Status: 'running' },
+          NetworkSettings: { Ports: { '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: String(port) }] } },
+        })
+      );
+    }
     if (req.method === 'GET' && url.includes('/logs')) {
       res.writeHead(200, { 'Content-Type': 'application/vnd.docker.raw-stream' });
       res.write(o.logs ?? '$ npm run build\nbuilt ok\n');
@@ -85,7 +104,7 @@ async function startFakeDaemon(o: FakeOpts) {
 
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as import('node:net').AddressInfo).port;
-  return { server, port, calls, uploaded: () => uploadedBytes };
+  return { server, port, calls, createdBodies, uploaded: () => uploadedBytes };
 }
 
 describe('docker runner over the Engine API (no docker CLI, no local daemon)', () => {
@@ -174,5 +193,77 @@ describe('docker runner over the Engine API (no docker CLI, no local daemon)', (
     const res = await runDocker(plan, proj);
     expect(res.ok).toBe(false);
     expect(res.log).toContain('unreachable');
+  });
+});
+
+describe('container-backed server preview', () => {
+  let prevHost: string | undefined;
+  let prevBind: string | undefined;
+  afterAll(() => {
+    if (prevHost === undefined) delete process.env.TM_DOCKER_HOST;
+    else process.env.TM_DOCKER_HOST = prevHost;
+    if (prevBind === undefined) delete process.env.TM_DOCKER_PREVIEW_BIND;
+    else process.env.TM_DOCKER_PREVIEW_BIND = prevBind;
+  });
+
+  it('binds the published port to loopback by default', async () => {
+    delete process.env.TM_DOCKER_PREVIEW_BIND;
+    const { previewBindIp, previewBindIsPublic, previewDialHost } = await import('@/server/sandbox');
+    expect(previewBindIp()).toBe('127.0.0.1');
+    expect(previewBindIsPublic()).toBe(false);
+    expect(previewDialHost()).toBe('127.0.0.1');
+  });
+
+  it('treats a wildcard bind as public and dials the daemon host', async () => {
+    process.env.TM_DOCKER_PREVIEW_BIND = '0.0.0.0';
+    process.env.TM_DOCKER_HOST = 'tcp://builder.internal:2375';
+    const { previewBindIsPublic, previewDialHost } = await import('@/server/sandbox');
+    expect(previewBindIsPublic()).toBe(true);
+    expect(previewDialHost()).toBe('builder.internal');
+    delete process.env.TM_DOCKER_PREVIEW_BIND;
+  });
+
+  it('uploads the tree, asks the daemon to pick a port, and reads it back', async () => {
+    const proj = mkdtempSync(path.join(tmpdir(), 'tm-srvproj-'));
+    writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0' }));
+
+    const fake = await startFakeDaemon({ mappedPort: 45555 });
+    process.env.TM_DOCKER_HOST = `http://127.0.0.1:${fake.port}`;
+    process.env.TM_PREVIEW_READY_TIMEOUT_MS = '300'; // nothing really listens
+
+    const sandbox = await import('@/server/sandbox');
+    const sb = await sandbox
+      .startContainer({ snapshotId: 's1', projDir: proj, startCmd: 'npm start', installCmd: 'npm ci' })
+      .catch(() => null);
+
+    expect(fake.createdBodies).toHaveLength(1);
+    const spec = fake.createdBodies[0];
+    expect(spec.Cmd.slice(0, 2)).toEqual(['bash', '-lc']);
+    expect(spec.Cmd[2]).toContain('npm ci');
+    expect(spec.Cmd[2]).toContain('npm start');
+    expect(spec.Env).toContain('HOST=0.0.0.0');
+    // loopback publish with a daemon-chosen port: previews cannot collide
+    expect(spec.HostConfig.PortBindings['3000/tcp']).toEqual([{ HostIp: '127.0.0.1', HostPort: '0' }]);
+    // same hardening as a build, and still no bind mounts at all
+    expect(spec.HostConfig.CapDrop).toEqual(['ALL']);
+    expect(spec.HostConfig.SecurityOpt).toContain('no-new-privileges');
+    expect(spec.HostConfig.Binds).toBeUndefined();
+    expect(fake.uploaded()).toBeGreaterThan(0);
+
+    // the port the daemon reported is the one we dial
+    if (sb) {
+      expect(sb.port).toBe(45555);
+      expect(sb.runner).toBe('docker');
+      sandbox.stop(sb.id);
+    }
+    delete process.env.TM_PREVIEW_READY_TIMEOUT_MS;
+  });
+
+  it('refuses to start a container preview when the daemon is down', async () => {
+    process.env.TM_DOCKER_HOST = 'http://127.0.0.1:1';
+    const sandbox = await import('@/server/sandbox');
+    await expect(
+      sandbox.startContainer({ snapshotId: 's2', projDir: '/tmp', startCmd: 'npm start' })
+    ).rejects.toThrow(/docker unreachable/);
   });
 });
