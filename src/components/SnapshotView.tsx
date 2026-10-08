@@ -31,7 +31,20 @@ function StatusChip({ status }: { status: PublicSnapshot['status'] }) {
   return <span className={`chip ${map[status]}`}>{label[status] || status}</span>;
 }
 
-export default function SnapshotView({ owner, name, when, sharePath }: { owner: string; name: string; when?: string; sharePath: string }) {
+export default function SnapshotView({
+  owner,
+  name,
+  when,
+  ref,
+  sharePath,
+}: {
+  owner: string;
+  name: string;
+  when?: string;
+  /** tag/branch/sha permalink (@v4.17.1); distinct from a date */
+  ref?: string;
+  sharePath: string;
+}) {
   const [snap, setSnap] = useState<PublicSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -50,7 +63,7 @@ export default function SnapshotView({ owner, name, when, sharePath }: { owner: 
         const res = await fetch('/api/snapshot', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo: `github.com/${owner}/${name}`, date: when }),
+          body: JSON.stringify({ repo: `github.com/${owner}/${name}`, date: when, ref: ref || undefined }),
         });
         const body = await res.json();
         if (cancelled) return;
@@ -88,7 +101,7 @@ export default function SnapshotView({ owner, name, when, sharePath }: { owner: 
       if (pollRef.current) clearInterval(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [owner, name, when]);
+  }, [owner, name, when, ref]);
 
   if (error) {
     return (

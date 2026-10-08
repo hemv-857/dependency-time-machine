@@ -143,6 +143,70 @@ export function postgresStore(): Store {
       vals.push(id);
       await get().query(`UPDATE snapshots SET ${sets.join(', ')} WHERE id = $${i + 1}`, vals);
     },
+    async findByRepoDate(repo, datePrefix) {
+      // range on the indexed repo column plus a prefix match on the date, so this
+      // never grows with table size and never touches GitHub
+      const res = await get().query(
+        `SELECT * FROM snapshots WHERE repo = $1 AND date_iso::text LIKE $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [repo, `${datePrefix}%`]
+      );
+      return res.rows[0] ? rowFrom(res.rows[0]) : null;
+    },
+    async list({ limit = 20, offset = 0, repo, status, q } = {}) {
+      const where: string[] = [];
+      const vals: unknown[] = [];
+      if (repo) {
+        vals.push(repo);
+        where.push(`repo = $${vals.length}`);
+      }
+      if (status) {
+        vals.push(status);
+        where.push(`status = $${vals.length}`);
+      }
+      if (q && q.trim()) {
+        vals.push(`%${q.trim().toLowerCase()}%`);
+        where.push(`LOWER(repo) LIKE $${vals.length}`);
+      }
+      vals.push(Math.min(Math.max(limit, 1), 100), Math.max(offset, 0));
+      const res = await get().query(
+        `SELECT * FROM snapshots ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+         ORDER BY created_at DESC LIMIT $${vals.length - 1} OFFSET $${vals.length}`,
+        vals
+      );
+      return res.rows.map(rowFrom);
+    },
+    async count({ repo, status, q } = {}) {
+      const where: string[] = [];
+      const vals: unknown[] = [];
+      if (repo) {
+        vals.push(repo);
+        where.push(`repo = $${vals.length}`);
+      }
+      if (status) {
+        vals.push(status);
+        where.push(`status = $${vals.length}`);
+      }
+      if (q && q.trim()) {
+        vals.push(`%${q.trim().toLowerCase()}%`);
+        where.push(`LOWER(repo) LIKE $${vals.length}`);
+      }
+      const res = await get().query(
+        `SELECT COUNT(*)::int AS n FROM snapshots ${where.length ? `WHERE ${where.join(' AND ')}` : ''}`,
+        vals
+      );
+      return Number(res.rows[0]?.n ?? 0);
+    },
+    async pruneTerminal(before) {
+      // only terminal rows: an in-flight snapshot is never deleted out from under
+      // a worker that is still writing to it
+      const res = await get().query(
+        `DELETE FROM snapshots
+         WHERE status IN ('ready','degraded','failed') AND updated_at < $1`,
+        [before]
+      );
+      return res.rowCount ?? 0;
+    },
     async listStranded(before) {
       const res = await get().query(
         `SELECT * FROM snapshots

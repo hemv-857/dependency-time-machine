@@ -7,6 +7,7 @@ import { GhCommit, GhRepo, NotFoundError, RateLimitError } from '@/core/git/reso
 import { ReleaseInfo } from '@/core/types';
 import { TtlCache } from './ttl-cache';
 import { withRetry } from './retry';
+import { budgetStatus, takeToken } from './gh-budget';
 import { appConfigured, clearTokenCache, tokenForRepo } from './github-app';
 
 function base(): string {
@@ -53,6 +54,15 @@ export class GhClient {
       'User-Agent': 'dependency-time-machine/0.1',
       ...(await this.authHeader(path)),
     };
+    // global ceiling on outbound calls, so this deployment cannot drain its own
+    // GITHUB_TOKEN quota no matter how many clients it has
+    if (!takeToken()) {
+      const st = budgetStatus();
+      throw new RateLimitError(
+        'This instance is at its GitHub API budget. Try again shortly.',
+        new Date(Date.now() + st.retryAfterSec * 1000).toISOString()
+      );
+    }
     const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(30_000) });
     const rem = res.headers.get('x-ratelimit-remaining');
     if (rem !== null) this.remaining = Number(rem);

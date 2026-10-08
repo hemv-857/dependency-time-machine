@@ -36,6 +36,13 @@ export interface Store {
   createSnapshot(row: SnapshotRow): Promise<void>;
   getSnapshot(id: string): Promise<SnapshotRow | null>;
   findSnapshot(repo: string, commitSha: string): Promise<SnapshotRow | null>;
+  /** Most recent snapshot for repo whose date_iso starts with `datePrefix` (e.g. "2023-06-01"). No GitHub call. */
+  findByRepoDate(repo: string, datePrefix: string): Promise<SnapshotRow | null>;
+  /** Newest snapshots, most recent first. */
+  list(opts: { limit?: number; offset?: number; repo?: string; status?: string; q?: string }): Promise<SnapshotRow[]>;
+  count(opts: { repo?: string; status?: string; q?: string }): Promise<number>;
+  /** Delete terminal snapshots last updated before `before`. Never touches in-flight rows. */
+  pruneTerminal(before: string): Promise<number>;
   updateSnapshot(id: string, patch: Partial<SnapshotRow>): Promise<void>;
   /** Non-terminal snapshots last touched before `before` (ISO). Used by the stale reaper. */
   listStranded(before: string): Promise<SnapshotRow[]>;
@@ -79,6 +86,42 @@ export function memoryStore(): Store {
       const r = rows.get(id);
       if (!r) return;
       Object.assign(r, patch, { updatedAt: nowIso() });
+    },
+    async findByRepoDate(repo, datePrefix) {
+      let best: SnapshotRow | null = null;
+      for (const r of rows.values()) {
+        if (r.repo !== repo || !r.dateIso.startsWith(datePrefix)) continue;
+        if (!best || r.createdAt > best.createdAt) best = { ...r };
+      }
+      return best;
+    },
+    async list({ limit = 20, offset = 0, repo, status, q } = {}) {
+      const needle = (q || '').trim().toLowerCase();
+      return [...rows.values()]
+        .filter((r) => (!repo || r.repo === repo) && (!status || r.status === status))
+        .filter((r) => !needle || r.repo.toLowerCase().includes(needle))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(offset, offset + limit)
+        .map((r) => ({ ...r }));
+    },
+    async count({ repo, status, q } = {}) {
+      const needle = (q || '').trim().toLowerCase();
+      return [...rows.values()].filter(
+        (r) =>
+          (!repo || r.repo === repo) &&
+          (!status || r.status === status) &&
+          (!needle || r.repo.toLowerCase().includes(needle))
+      ).length;
+    },
+    async pruneTerminal(before) {
+      let n = 0;
+      for (const [id, r] of [...rows.entries()]) {
+        if (isTerminal(r.status) && r.updatedAt < before) {
+          rows.delete(id);
+          n++;
+        }
+      }
+      return n;
     },
     async listStranded(before: string) {
       return [...rows.values()]

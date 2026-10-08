@@ -90,6 +90,27 @@ async function enrichDiff(
     ...interesting.filter((c) => c.kind !== 'major').map((c) => c.name),
   ].slice(0, 12);
   for (const n of new Set(names)) docs[n] = await npmDoc(n);
+
+  // real release notes for the biggest bumps, from each package's own repo.
+  // best effort and capped — a missing notes page must never fail the snapshot.
+  const gh = (await import('./github')).ghClient();
+  const { packageReleaseNotes } = await import('./pkg-notes');
+  const { githubRepoFromNpmDoc } = await import('@/core/changelog/story');
+  const notable = diff.changes.filter((c) => c.kind === 'major' && c.to).slice(0, 8);
+  await Promise.all(
+    notable.map(async (c) => {
+      const doc = docs[c.name];
+      if (!doc) return;
+      const slug = githubRepoFromNpmDoc(doc);
+      if (!slug) return;
+      try {
+        const notes = await packageReleaseNotes(gh, slug, c.from, c.to!);
+        if (notes) doc.notes = notes;
+      } catch {
+        /* keep the generic body */
+      }
+    })
+  );
   for (const c of diff.changes) {
     if (c.kind === 'added' || c.kind === 'removed') continue;
     const doc = docs[c.name] || null;

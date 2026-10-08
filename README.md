@@ -19,6 +19,7 @@ OSV advisory data.
 |---|---|
 | **Resolve** | `git rev-list -n 1 --before=DATE` equivalent via the GitHub API, or jump to a tag |
 | **Export** | Download the whole snapshot as a standalone Markdown report |
+| **Share** | OpenGraph/Twitter card generated from the permalink, no snapshot needed |
 | **Analyse** | Fetch the commit tarball, detect ecosystem, parse manifest and lockfile |
 | **Diff** | Lockfile then-vs-now: majors, minors, patches, additions, removals |
 | **Security lens** | OSV batch query — which advisories were open back then, which are fixed now, which are still open |
@@ -116,6 +117,8 @@ Everything is optional; defaults run in-process with in-memory state.
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | — | Enables private repos. See below. |
 | `TM_STALE_SNAPSHOT_MS` | `900000` | Fail snapshots stranded by a dead process. |
 | `TM_PUBLIC_URL` | — | Public origin for permalinks in exported Markdown. |
+| `TM_SNAPSHOT_RETENTION_DAYS` | `90` | Age out terminal snapshots. `0` disables. |
+| `TM_GITHUB_BUDGET` / `TM_GITHUB_BUDGET_REFILL` | `4000` / `70` | Global token bucket over outbound GitHub calls. |
 | `TM_DOCKER_PREVIEW_BIND` | `127.0.0.1` | Address the preview container's port binds to on the daemon host. |
 | `TM_PREVIEW_READY_TIMEOUT_MS` | `120000` | How long to wait for a preview container. |
 | `DATABASE_URL` | — | Postgres. Without it, snapshots are lost on restart. |
@@ -135,6 +138,9 @@ Full list in [`.env.example`](.env.example).
 
 ```
 GET  /api/resolve?repo=github.com/o/r&date=2023-06-01
+GET  /api/snapshots?limit=&offset=&repo=&status=&q=   browse/search
+GET  /api/snapshot/:id/markdown                        download the report
+GET  /og/:owner/:repo/:date                            OpenGraph image
 POST /api/snapshot                  { repo, date?, ref?, force? }
 GET  /api/snapshot/:id
 GET  /api/snapshot/:id/events       SSE progress stream
@@ -152,7 +158,7 @@ snapshots degrade rather than break.
 
 ```bash
 npm run typecheck
-npm test              # 112 unit tests
+npm test              # 130 unit tests
 npm run test:e2e      # build + 11 Playwright tests
 ```
 
@@ -199,6 +205,20 @@ snapshots are unaffected.
 - **Fly.io** — see `fly.toml`. The web machine runs no daemon and no docker CLI;
   point `TM_DOCKER_HOST` at a separate builder host.
 
+## Operating notes
+
+- **Retention.** Terminal snapshots are deleted after `TM_SNAPSHOT_RETENTION_DAYS`
+  (90 by default). In-flight rows are never pruned, and neither are stranded ones —
+  those are failed by the reaper first.
+- **API budget.** A token bucket (`TM_GITHUB_BUDGET`) caps outbound GitHub calls
+  per process. The per-IP limiter protects against one client; this protects the
+  deployment's own token quota from all of them. `/api/snapshots` reports the
+  remaining budget.
+- **Caching.** Terminal snapshots are immutable, so `/api/snapshot/:id` sends an
+  ETag and `stale-while-revalidate`; repeat permalink views cost a 304. In-flight
+  snapshots stay `no-store` so pollers never see stale progress.
+- **Browse.** `/snapshots` lists and filters what has been snapshotted.
+
 ## Limitations
 
 - Private repositories need a GitHub App; there is no per-user OAuth flow.
@@ -210,6 +230,10 @@ snapshots are unaffected.
 - The remote-daemon build and preview paths are verified against a fake Engine
   API rather than a live daemon.
 - Advisory coverage follows OSV: npm, PyPI, Go and crates.io.
+- Release notes are quoted when a package's own repo published one covering the
+  jump; otherwise the generic description is kept, so cards can still be vague.
+- The API budget is per-process and in-memory, so it resets on restart and is not
+  shared between instances.
 - Node's `--permission` model is not used as isolation; it is not a security
   boundary.
 - In-memory state means one process. Scale out with Postgres + Redis.

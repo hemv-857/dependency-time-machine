@@ -59,8 +59,17 @@ export default function TimelineSlider({
         max={asc.length - 1}
         value={idx}
         onChange={(e) => setIdx(Number(e.target.value))}
-        aria-label="Timeline"
+        // a range input announces only a bare index otherwise
+        aria-label="Repo timeline"
+        aria-valuetext={point ? `${point.label}, ${point.date.slice(0, 10)}` : undefined}
+        aria-valuemin={0}
+        aria-valuemax={asc.length - 1}
+        aria-valuenow={idx}
+        aria-describedby="tm-timeline-help"
       />
+      <p id="tm-timeline-help" className="sr-only">
+        Drag through {asc.length} release points, then activate Jump to this date to load that snapshot.
+      </p>
       <div className="mono mt-1 flex justify-between text-[10px] text-slate-600">
         <span>{asc[0]?.date.slice(0, 10)}</span>
         <span>{asc.length} points</span>

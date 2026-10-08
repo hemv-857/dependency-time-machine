@@ -56,12 +56,15 @@ export default function DiffTable({ diff }: { diff: LockDiff }) {
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-left text-sm">
+            <caption className="sr-only">
+              Dependency versions then versus now, with the kind of change and any advisories.
+            </caption>
             <thead className="border-b border-edge bg-black/30 text-xs uppercase tracking-wider text-slate-500">
               <tr>
-                <th className="px-4 py-2 font-medium">package</th>
-                <th className="px-4 py-2 font-medium">then</th>
-                <th className="px-4 py-2 font-medium">now</th>
-                <th className="px-4 py-2 font-medium">change</th>
+                <th scope="col" className="px-4 py-2 font-medium">package</th>
+                <th scope="col" className="px-4 py-2 font-medium">then</th>
+                <th scope="col" className="px-4 py-2 font-medium">now</th>
+                <th scope="col" className="px-4 py-2 font-medium">change</th>
               </tr>
             </thead>
             <tbody>

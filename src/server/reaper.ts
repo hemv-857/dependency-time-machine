@@ -51,6 +51,24 @@ export async function reapStaleSnapshots(now = Date.now()): Promise<ReapResult> 
   return { swept: ids.length, ids };
 }
 
+/**
+ * Delete terminal snapshots older than the retention window.
+ *
+ * The in-memory caches were bounded, but Postgres was not: without this every
+ * snapshot anyone ever requested accumulates forever. Only rows in a terminal
+ * status are eligible, so a snapshot a worker is still writing to is never
+ * deleted out from under it.
+ */
+export async function pruneOldSnapshots(now = Date.now()): Promise<number> {
+  const store = getStore();
+  const days = Number(process.env.TM_SNAPSHOT_RETENTION_DAYS || 90);
+  if (days <= 0) return 0; // retention disabled
+  const cutoff = new Date(now - days * 86400_000).toISOString();
+  const n = await store.pruneTerminal(cutoff);
+  if (n > 0) log.info({ pruned: n, olderThanDays: days }, 'pruned old snapshots');
+  return n;
+}
+
 const globalForReaper = globalThis as unknown as { __tmReaper?: NodeJS.Timeout };
 
 /**
@@ -61,9 +79,11 @@ const globalForReaper = globalThis as unknown as { __tmReaper?: NodeJS.Timeout }
 export function startReaper(): void {
   if (globalForReaper.__tmReaper) return;
   const t = setInterval(() => {
-    reapStaleSnapshots().catch((e) => log.error({ err: (e as Error).message }, 'reaper sweep failed'));
+    reapStaleSnapshots()
+      .then(() => pruneOldSnapshots())
+      .catch((e) => log.error({ err: (e as Error).message }, 'reaper sweep failed'));
   }, SWEEP_MS);
   t.unref();
   globalForReaper.__tmReaper = t;
-  log.info({ staleMs: STALE_MS, everyMs: SWEEP_MS }, 'stale snapshot reaper started');
+  log.info({ staleMs: STALE_MS, everyMs: SWEEP_MS, retentionDays: Number(process.env.TM_SNAPSHOT_RETENTION_DAYS || 90) }, 'stale snapshot reaper started');
 }

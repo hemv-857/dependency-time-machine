@@ -2,7 +2,10 @@ import { LockDiff, ReleaseInfo, SecurityLens, Story, StoryCard } from '../types'
 
 export interface NpmDocLite {
   repository?: { url?: string } | string;
-  time?: Record<string, string>;
+  /** latest published version, from the registry /latest endpoint */
+  ownVersion?: string;
+  /** real release notes for this package's jump, filled in by the server */
+  notes?: { summary: string; tag?: string; url?: string; date?: string } | null;
 }
 
 export function githubRepoFromNpmDoc(doc: NpmDocLite | null): string | null {
@@ -60,18 +63,19 @@ export function buildStory(opts: {
   const majors = diff.changes.filter((c) => c.kind === 'major').slice(0, 8);
   for (const c of majors) {
     const doc = npmDocs[c.name] || null;
-    const published = c.to ? doc?.time?.[c.to] : undefined;
     cards.push({
       id: `major-${c.name}`,
       kind: 'major',
       title: `${c.name} ${c.from || '∅'} → ${c.to}`,
-      date: published,
+      date: doc?.notes?.date,
       pkg: c.name,
       from: c.from,
       to: c.to,
-      body: published
-        ? `Major release published ${humanDate(published)}. Check the release notes before upgrading — major bumps usually mean breaking changes.`
-        : 'Major release. Check the release notes before upgrading — major bumps usually mean breaking changes.',
+      // prefer the package's own release notes; the generic sentence tells the
+      // reader nothing the version number did not already imply
+      body:
+        doc?.notes?.summary ||
+        'Major release. Check the release notes before upgrading — major bumps usually mean breaking changes.',
       links: linksForPackage(c.name, c.from || '—', c.to!, doc),
     });
   }

@@ -244,7 +244,9 @@ test.describe('AUDIT', () => {
     watch(page, 'responsive');
     for (const [w, h, label] of [[375, 812, 'mobile'], [768, 1024, 'tablet'], [1280, 900, 'desktop']] as const) {
       await page.setViewportSize({ width: w, height: h });
-      await settle(page, '/', `home@${label}`);
+      await page.goto('/');
+      await page.waitForLoadState('domcontentloaded');
+      await overflow(page, `home@${label}`);
       await settle(page, '/github.com/demo/demo@2023-06-01', `snapshot@${label}`);
     }
   });
@@ -271,6 +273,133 @@ test.describe('AUDIT', () => {
     const miss = await page.request.get('/api/snapshot/does-not-exist');
     if (miss.status() !== 404) note('warn', 'errors', `unknown snapshot id returned ${miss.status()}, expected 404`);
     else note('info', 'errors', 'unknown snapshot id -> 404');
+  });
+
+  test('07 new surfaces: OG card, browse page, listing API, markdown export', async ({ page }) => {
+    watch(page, 'new-surfaces');
+
+    // social metadata must exist without a snapshot being resolved (crawlers
+    // never run JS, and the permalink resolves client-side)
+    const html = await (await page.request.get('/github.com/axios/axios@2023-06-01')).text();
+    if (!/property="og:title"/.test(html)) note('critical', 'new-surfaces', 'no og:title on a shareable permalink');
+    if (!/property="og:image"/.test(html)) note('critical', 'new-surfaces', 'no og:image on a shareable permalink');
+    if (!/name="twitter:card"/.test(html)) note('warn', 'new-surfaces', 'no twitter:card meta');
+    const ogImg = /property="og:image" content="([^"]+)"/.exec(html)?.[1];
+    if (!ogImg) {
+      note('critical', 'new-surfaces', 'og:image has no URL');
+    } else {
+      const img = await page.request.get(ogImg);
+      const type = img.headers()['content-type'] || '';
+      if (img.status() !== 200) note('critical', 'new-surfaces', `og:image returned ${img.status()}`);
+      // Slack/X will not render an SVG or an HTML error page
+      else if (!/image\/(png|jpeg|webp|gif)/.test(type)) {
+        note('critical', 'new-surfaces', `og:image content-type is ${type}, not a renderable raster image`);
+      } else {
+        note('info', 'new-surfaces', `og:image renders as ${type}`);
+      }
+    }
+
+    // listing API
+    const list = await page.request.get('/api/snapshots?limit=5');
+    if (!list.ok()) note('critical', 'new-surfaces', `/api/snapshots returned ${list.status()}`);
+    else {
+      const j = await list.json();
+      if (!Array.isArray(j.items)) note('critical', 'new-surfaces', '/api/snapshots has no items array');
+      else if (typeof j.githubBudget?.remaining !== 'number') {
+        note('warn', 'new-surfaces', '/api/snapshots does not report the github budget');
+      } else {
+        note('info', 'new-surfaces', `listing returns ${j.items.length}/${j.total}, budget ${j.githubBudget.remaining}`);
+      }
+      if (j.items?.[0]) {
+        const md = await page.request.get(`/api/snapshot/${j.items[0].id}/markdown`);
+        if (!md.ok()) note('critical', 'new-surfaces', `markdown export returned ${md.status()}`);
+        else if (!/text\/markdown/.test(md.headers()['content-type'] || '')) {
+          note('critical', 'new-surfaces', 'markdown export has the wrong content-type');
+        } else {
+          note('info', 'new-surfaces', `markdown export ${(await md.body()).length} bytes`);
+        }
+      }
+    }
+
+    // conditional requests
+    const one = await page.request.get('/api/snapshots?limit=1');
+    const id = (await one.json()).items?.[0]?.id;
+    if (id) {
+      const first = await page.request.get(`/api/snapshot/${id}`);
+      const etag = first.headers()['etag'];
+      if (!etag) note('warn', 'new-surfaces', 'snapshot response has no ETag');
+      else {
+        const second = await page.request.get(`/api/snapshot/${id}`, { headers: { 'if-none-match': etag } });
+        if (second.status() !== 304) note('critical', 'new-surfaces', `If-None-Match returned ${second.status()}, expected 304`);
+        else note('info', 'new-surfaces', 'ETag revalidation returns 304');
+      }
+    }
+
+    // browse page renders and its filters are labelled
+    await page.goto('/snapshots');
+    await expect(page.getByRole('heading', { level: 1 })).toContainText('Browse snapshots');
+    await expect(page.getByLabel('Repository')).toBeVisible();
+    await expect(page.getByLabel('Status')).toBeVisible();
+    await overflow(page, 'snapshots');
+  });
+
+  test('08 accessibility basics', async ({ page }) => {
+    watch(page, 'a11y');
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+
+    // keyboard focus must be visible; preflight removes outlines, so this
+    // regressed silently once already
+    const ring = await page.evaluate(() => {
+      const el = document.querySelector('a, button') as HTMLElement | null;
+      if (!el) return null;
+      el.focus();
+      const s = getComputedStyle(el);
+      return { outlineWidth: s.outlineWidth, outlineStyle: s.outlineStyle };
+    });
+    if (!ring) note('warn', 'a11y', 'no focusable element on the home page');
+    else if (ring.outlineStyle === 'none' || parseFloat(ring.outlineWidth) < 1) {
+      note('critical', 'a11y', `focused element has no visible outline (${ring.outlineStyle} ${ring.outlineWidth})`);
+    } else {
+      note('info', 'a11y', `focus ring present (${ring.outlineWidth} ${ring.outlineStyle})`);
+    }
+
+    // skip link, and landmarks
+    const skip = await page.locator('a[href="#main"]').count();
+    if (!skip) note('warn', 'a11y', 'no skip-to-content link');
+    const navs = await page.locator('nav').count();
+    if (!navs) note('warn', 'a11y', 'no nav landmark');
+    const unnamedNav = await page.evaluate(
+      () => [...document.querySelectorAll('nav')].filter((n) => !n.getAttribute('aria-label')).length
+    );
+    if (unnamedNav > 0) note('warn', 'a11y', `${unnamedNav} nav landmark(s) without an aria-label`);
+
+    // images/controls need accessible names
+    const unlabelled = await page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button, a')] as HTMLElement[];
+      return btns.filter((b) => !(b.textContent || '').trim() && !b.getAttribute('aria-label')).length;
+    });
+    if (unlabelled > 0) note('warn', 'a11y', `${unlabelled} control(s) with no accessible name`);
+
+    // reduced motion must be respected. 0.001ms computes to 1e-06s, so compare
+    // numerically rather than matching a literal string.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+    await overflow(page, 'a11y/reduced-motion');
+    const durations = await page.evaluate(() =>
+      [...document.querySelectorAll('button, a, input')]
+        .slice(0, 25)
+        .map((el) => getComputedStyle(el).transitionDuration)
+        .filter((d) => d && d !== '0s')
+    );
+    const worst = durations.reduce((max, d) => Math.max(max, parseFloat(d) || 0), 0);
+    if (durations.length && worst > 0.01) {
+      note('warn', 'a11y', `transitions still run under prefers-reduced-motion (worst ${worst}s)`);
+    } else {
+      note('info', 'a11y', `prefers-reduced-motion collapses transitions (worst ${worst}s)`);
+    }
+    await page.emulateMedia({ reducedMotion: null });
   });
 
   test('REPORT', async () => {

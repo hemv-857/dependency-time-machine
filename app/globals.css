@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Accessibility baseline.
+ *
+ * Tailwind's preflight removes outlines, so keyboard users get *no* focus
+ * indicator by default. Restoring a visible ring on every interactive element is
+ * the single highest-impact fix here, and `:focus-visible` keeps it off mouse
+ * clicks so it does not become visual noise.
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Honour the OS setting: no animation for people who asked for none. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :where(.card, input, select, textarea) {
+    border-color: #94a3b8;
+  }
+  :root {
+    color-scheme: dark;
+  }
+}
+
+/* Screen-reader-only, but focusable (skip link). */
+.sr-only-focusable:not(:focus):not(:focus-within) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
 :root {
   color-scheme: dark;
 }
