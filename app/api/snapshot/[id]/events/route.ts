@@ -7,9 +7,10 @@ export const dynamic = 'force-dynamic';
 const TERMINAL = new Set(['ready', 'degraded', 'failed']);
 
 /** SSE progress stream: `snapshot` (initial), `stage` (progress), `done` (final full snapshot). */
-export async function GET(req: Request, { params }: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   const store = getStore();
-  const row = await store.getSnapshot(params.id);
+  const row = await store.getSnapshot(id);
   if (!row) return Response.json({ error: 'not_found' }, { status: 404 });
 
   const encoder = new TextEncoder();

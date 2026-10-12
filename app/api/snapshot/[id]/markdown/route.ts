@@ -5,15 +5,16 @@ import { rateLimit, tooMany, clientIp } from '@/server/ratelimit';
 export const dynamic = 'force-dynamic';
 
 /** Download a snapshot as a standalone Markdown report. */
-export async function GET(req: Request, ctx: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const id = (await params).id;
   const rl = await rateLimit(`md:${clientIp(req)}`, 60, 60);
   if (!rl.ok) return tooMany(rl);
 
   const store = getStore();
-  const row = await store.getSnapshot(ctx.params.id);
+  const row = await store.getSnapshot(id);
   if (!row) {
     return Response.json(
-      { error: 'NotFoundError', message: `No snapshot with id ${ctx.params.id}` },
+      { error: 'NotFoundError', message: `No snapshot with id ${id}` },
       { status: 404 }
     );
   }
