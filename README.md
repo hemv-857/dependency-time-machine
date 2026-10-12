@@ -240,6 +240,10 @@ snapshots are unaffected.
   boundary.
 - In-memory state means one process. Scale out with Postgres + Redis.
 
-## License
+## Contributing
 
-MIT — see [LICENSE](LICENSE).
+Open a PR. CI runs on every push and pull request and must be green before merge ([workflow](.github/workflows/ci.yml)).
+
+Keep commits conventional — `type: description`.
+
+#
