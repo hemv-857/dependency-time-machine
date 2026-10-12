@@ -1,5 +1,7 @@
 # Dependency Time Machine
 
+<a href="https://github.com/hemv-857/dependency-time-machine/actions/workflows/ci.yml"><img src="https://github.com/hemv-857/dependency-time-machine/actions/workflows/ci.yml/badge.svg" alt="dependency-time-machine CI"></a> <a href="https://github.com/hemv-857/dependency-time-machine/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a> <img src="https://img.shields.io/badge/TypeScript-3178C6.svg" alt="TypeScript">
+
 Enter any repository URL and a past date. It resolves the commit closest to that
 day, rebuilds the project from that exact lockfile, and tells you what shipped
 since — the majors, the minors, and the CVEs that no longer exist.
