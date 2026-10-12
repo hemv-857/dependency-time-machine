@@ -2,8 +2,9 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import SnapshotView from '@/components/SnapshotView';
 
+// Next 15+ delivers params as a Promise, to both the page and generateMetadata.
 interface Props {
-  params: { tm: string[] };
+  params: Promise<{ tm: string[] }>;
 }
 
 interface Parsed {
@@ -15,7 +16,7 @@ interface Parsed {
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const parsed = parseSharePathSegments(params.tm);
+  const parsed = parseSharePathSegments((await params).tm);
   if (!parsed) return { title: 'Dependency Time Machine' };
 
   const label = parsed.when || parsed.ref || 'a past date';
@@ -66,8 +67,9 @@ function parseSharePathSegments(segments: string[]): Parsed | null {
   return { owner, name, when, ref, label: `${owner}/${name}${when || ref ? ` @ ${when || ref}` : ''}` };
 }
 
-export default function SharePage({ params }: Props) {
-  const parsed = parseSharePathSegments(params.tm);
+export default async function SharePage({ params }: Props) {
+  const { tm } = await params;
+  const parsed = parseSharePathSegments(tm);
   // This catch-all matches every path, so a bad URL would otherwise render a
   // 200 "not a time machine URL" page. notFound() serves the same content from
   // app/not-found.tsx with a real 404 status.
@@ -78,7 +80,7 @@ export default function SharePage({ params }: Props) {
       name={parsed.name}
       when={parsed.when}
       ref={parsed.ref}
-      sharePath={`/${params.tm.map(encodeURIComponent).join('/')}`}
+      sharePath={`/${tm.map(encodeURIComponent).join('/')}`}
     />
   );
 }

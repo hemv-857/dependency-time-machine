@@ -15,9 +15,10 @@ export const dynamic = 'force-dynamic';
  * While a snapshot is still running it stays uncacheable, so a client polling for
  * progress never receives a stale "analyzing".
  */
-export async function GET(req: Request, { params }: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   const store = getStore();
-  const row = await store.getSnapshot(params.id);
+  const row = await store.getSnapshot(id);
   if (!row) return Response.json({ error: 'not_found' }, { status: 404 });
 
   const terminal = row.status === 'ready' || row.status === 'degraded' || row.status === 'failed';

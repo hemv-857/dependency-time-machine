@@ -19,8 +19,8 @@ function escapeXml(s: string): string {
   );
 }
 
-export async function GET(_req: Request, ctx: { params: { repo: string; date: string } }) {
-  const { repo, date } = ctx.params;
+export async function GET(_req: Request, { params }: { params: Promise<{ repo: string; date: string }> }) {
+  const { repo, date } = await params;
   const [owner, name] = repo.split('/');
   const when = /^\d{4}-\d{2}-\d{2}/.exec(date || '')?.[0] || '';
 

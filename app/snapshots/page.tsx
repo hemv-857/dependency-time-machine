@@ -44,10 +44,12 @@ async function fetchItems(params: { status?: string; q?: string }): Promise<{ it
 export default async function BrowsePage({
   searchParams,
 }: {
-  searchParams: { status?: string; q?: string };
+  // Next 15+ delivers searchParams as a Promise.
+  searchParams: Promise<{ status?: string; q?: string }>;
 }) {
-  const status = FILTERS.includes(searchParams.status || '') ? searchParams.status : undefined;
-  const q = searchParams.q?.slice(0, 100);
+  const sp = await searchParams;
+  const status = FILTERS.includes(sp.status || '') ? sp.status : undefined;
+  const q = sp.q?.slice(0, 100);
   const { items, total, error } = await fetchItems({ status, q });
 
   return (

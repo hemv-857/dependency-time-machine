@@ -44,12 +44,18 @@ async function proxy(req: Request, sandboxId: string, path: string[] | undefined
   return new Response(upstream.body, { status: upstream.status, headers: resHeaders });
 }
 
-type Ctx = { params: { sandbox: string; path?: string[] } };
+// Next 15+ delivers route params as a Promise.
+type Ctx = { params: Promise<{ sandbox: string; path?: string[] }> };
 
-export const GET = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const POST = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const PUT = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const PATCH = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const DELETE = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const HEAD = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
-export const OPTIONS = (req: Request, ctx: Ctx) => proxy(req, ctx.params.sandbox, ctx.params.path);
+const route = async (req: Request, ctx: Ctx) => {
+  const { sandbox, path } = await ctx.params;
+  return proxy(req, sandbox, path);
+};
+
+export const GET = route;
+export const POST = route;
+export const PUT = route;
+export const PATCH = route;
+export const DELETE = route;
+export const HEAD = route;
+export const OPTIONS = route;
